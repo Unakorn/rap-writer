@@ -1,0 +1,41 @@
+# Private configuration and user content
+.env
+.env.*
+!.env.example
+*settings.json
+*preferences.json
+*.log
+*log.txt
+Last error.txt
+Exports/
+exports/
+Auto Generated/
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.aiff
+*.mid
+*.midi
+*.flp
+*.fst
+# Dependencies, generated models and builds
+.venv/
+venv/
+.runtime/
+runtime/
+models/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+*.exe
+*.dll
+*.zip
+*.pth
+*.onnx
+*.ckpt
+.pytest_cache/
+.DS_Store
+Thumbs.db
