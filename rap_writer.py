@@ -29,6 +29,21 @@ MUTED = '#adc0cc'
 ACCENT = '#6ee7c0'
 GREEN = '#a8d5b2'
 RED = '#ff9393'
+BRIEF_FIELDS = ('topic', 'details', 'hook_note', 'good_words')
+BRIEF_MEMORY_VERSION = 1
+RECENT_IDEA_LIMIT = 8
+
+
+def remembered_idea(value):
+    """Keep only bounded creative fields when restoring local idea memory."""
+    if not isinstance(value, dict):
+        return None
+    limits = dict(topic=3000, details=3000, hook_note=500, good_words=500)
+    limits.update({name: 100 for name in IDEA_CHOICES})
+    if any(not isinstance(value.get(name), str) for name in BRIEF_FIELDS):
+        return None
+    return {name: value[name][:limit] for name, limit in limits.items()
+            if isinstance(value.get(name), str)}
 
 
 def default_settings_path():
@@ -57,7 +72,7 @@ def environment_key():
 class RapWriter(tk.Tk):
     def __init__(self, settings_path=None):
         super().__init__()
-        self.title('Rap Writer · Song JSON')
+        self.title('Rap Writer · Fresh AI')
         self.geometry('1220x880')
         self.minsize(1040, 740)
         self.configure(bg=BG)
@@ -81,7 +96,10 @@ class RapWriter(tk.Tk):
         self._draft_map_changed = False
         self._active_job_kind = None
         self._idea_pending_snapshot = None
+        self._idea_pending_provenance = None
         self._idea_undo_snapshot = None
+        self._idea_undo_provenance = None
+        self._last_ai_idea = None
         self._recent_ideas = []
         self._applying_idea = False
         self._styles()
@@ -155,8 +173,10 @@ class RapWriter(tk.Tk):
         self.undo_idea_btn.pack(side='right', padx=(8, 8))
         self.load_song_btn = self.button(idea_row, 'Load song JSON…', self.load_song_structure)
         self.load_song_btn.pack(side='left')
+        self.new_brief_btn = self.button(idea_row, 'New brief', self.new_brief)
+        self.new_brief_btn.pack(side='left', padx=(8, 0))
         self.label(idea_row, 'Fills the brief and direction using your connection.', 9, MUTED,
-                   wraplength=410, justify='left').pack(side='left', padx=14, fill='x', expand=True)
+                   wraplength=290, justify='left').pack(side='left', padx=14, fill='x', expand=True)
 
         main = tk.Frame(self, bg=BG, padx=24)
         main.pack(fill='both', expand=True)
@@ -191,8 +211,8 @@ class RapWriter(tk.Tk):
         self.label(form, '01  /  THE BRIEF', 10, ACCENT, True).pack(anchor='w', pady=(0, 7))
         self.label(form, 'What do you want to say?', bold=True).pack(anchor='w')
         self.text_field(form, 'topic', 2)
-        self.label(form, 'Real details + your own voice', bold=True).pack(anchor='w')
-        self.label(form, 'A late drive, an unread text, a win that cost you.', 9, MUTED).pack(anchor='w')
+        self.label(form, 'Your meaning + your own voice', bold=True).pack(anchor='w')
+        self.label(form, 'Feelings, facts or a direction. Details are optional.', 9, MUTED).pack(anchor='w')
         self.text_field(form, 'details', 2)
         self.label(form, 'Title or hook phrase (optional)', bold=True).pack(anchor='w')
         self.label(form, 'A short phrase people can sing back.', 9, MUTED).pack(anchor='w')
@@ -262,9 +282,14 @@ class RapWriter(tk.Tk):
 
         action_frame = tk.Frame(sidebar, bg=PANEL, padx=18, pady=10)
         action_frame.grid(row=1, column=0, columnspan=2, sticky='ew')
-        self.generate_btn = self.button(action_frame, 'Write my lyrics', self.start_generation, True)
+        self.wanted_summary = self.label(action_frame, 'Wanted words: none', 9, MUTED,
+                                         wraplength=355, justify='left')
+        self.wanted_summary.pack(fill='x', pady=(0, 8))
+        action_buttons = tk.Frame(action_frame, bg=PANEL)
+        action_buttons.pack(fill='x')
+        self.generate_btn = self.button(action_buttons, 'Write my lyrics', self.start_generation, True)
         self.generate_btn.pack(side='left', fill='x', expand=True)
-        self.cancel_btn = self.button(action_frame, 'Stop', self.cancel_generation)
+        self.cancel_btn = self.button(action_buttons, 'Stop', self.cancel_generation)
         self.cancel_btn.configure(state='disabled')
         self.cancel_btn.pack(side='left', padx=(8, 0))
 
@@ -332,6 +357,7 @@ class RapWriter(tk.Tk):
     def request(self, rewrite=False):
         if self._song_structure_error:
             raise ValidationError(self._song_structure_error)
+        self._clear_stale_ai_words()
         return LyricRequest(topic=self.value('topic'), details=self.value('details'),
                             style=self.style_var.get(), mood=self.mood_var.get(),
                             phrasing=self.phrasing_var.get(), rhyme_style=self.rhyme_var.get(),
@@ -644,6 +670,7 @@ class RapWriter(tk.Tk):
 
     def _load_settings(self):
         self.model_var = tk.StringVar(value=DEFAULT_MODEL)
+        migrated_words = False
         try:
             data = json.loads(self.settings_path.read_text(encoding='utf-8'))
             if not isinstance(data, dict):
@@ -675,9 +702,24 @@ class RapWriter(tk.Tk):
                     self._song_structure_error = 'The saved song map is invalid. Load Song Structure.json again or clear the imported map.'
             elif data.get('song_structure_restore_error') is True:
                 self._song_structure_error = 'The saved song map is invalid. Load Song Structure.json again or clear the imported map.'
+            history = data.get('recent_ideas', [])
+            self._recent_ideas = []
+            if isinstance(history, list):
+                for item in history[-RECENT_IDEA_LIMIT:]:
+                    clean = remembered_idea(item)
+                    if clean is not None:
+                        self._recent_ideas.append(clean)
+            self._last_ai_idea = remembered_idea(data.get('last_ai_idea'))
+            if data.get('brief_memory_version') != BRIEF_MEMORY_VERSION and blocked_hits(self.value('good_words'), ''):
+                self.fields['good_words'].delete('1.0', 'end')
+                self.fields['good_words'].edit_modified(False)
+                migrated_words = True
         except (OSError, ValueError):
             pass
         self._sync_song_ui()
+        self._update_wanted_summary()
+        if migrated_words and self._save_settings():
+            self.status_var.set('Cleared an old saved word list so it cannot steer your new lyrics.')
 
     def _save_settings(self):
         data = {name: self.value(name) for name in self.fields}
@@ -687,6 +729,10 @@ class RapWriter(tk.Tk):
                     structure=self.structure_var.get(), explicit=self.explicit_var.get(),
                     require_good_words=self.require_var.get(), model=self.model_var.get())
         data['custom_sections'] = self.custom_sections
+        data['brief_memory_version'] = BRIEF_MEMORY_VERSION
+        data['recent_ideas'] = [clean for item in self._recent_ideas[-RECENT_IDEA_LIMIT:]
+                                if (clean := remembered_idea(item)) is not None]
+        data['last_ai_idea'] = remembered_idea(self._last_ai_idea)
         try:
             data['song_structure'] = validate_song_structure(self.song_structure) if self.song_structure is not None else None
         except SongStructureError:
@@ -748,7 +794,46 @@ class RapWriter(tk.Tk):
             if self._applying_idea:
                 return
             if hasattr(self, 'gate_label') and hasattr(self, 'require_var'):
+                self._update_wanted_summary()
                 self._update_gate()
+
+    def _update_wanted_summary(self):
+        words = ' '.join(self.value('good_words').split())
+        if len(words) > 125:
+            words = words[:122] + '…'
+        self.wanted_summary.configure(text='Wanted words: ' + (words or 'none'))
+
+    def _clear_stale_ai_words(self):
+        idea = self._last_ai_idea
+        if idea is None or not idea.get('good_words'):
+            return False
+        changed = any(self.fields[name].get('1.0', 'end-1c') != idea[name]
+                      for name in ('topic', 'details', 'hook_note'))
+        current_words = self.fields['good_words'].get('1.0', 'end-1c')
+        if not changed or current_words != idea['good_words']:
+            return False
+        self.fields['good_words'].delete('1.0', 'end')
+        self.fields['good_words'].edit_modified(False)
+        self._update_wanted_summary()
+        self.status_var.set('Your brief changed, so the previous AI idea’s suggested words were cleared.')
+        return True
+
+    def new_brief(self):
+        if self.busy:
+            return
+        for name in BRIEF_FIELDS:
+            self.fields[name].delete('1.0', 'end')
+            self.fields[name].edit_modified(False)
+        self._last_ai_idea = None
+        self._idea_undo_snapshot = None
+        self._idea_undo_provenance = None
+        self.undo_idea_btn.configure(state='disabled')
+        self._update_wanted_summary()
+        self._update_gate()
+        self.form_canvas.yview_moveto(0)
+        self.fields['topic'].focus_set()
+        if self._save_settings():
+            self.status_var.set('New brief ready. Your lyrics, song structure and writing settings are kept.')
 
     def _editor_modified(self, event):
         if self.editor.edit_modified():
@@ -831,6 +916,7 @@ class RapWriter(tk.Tk):
             raise
         finally:
             self._applying_idea = False
+        self._update_wanted_summary()
         self._update_gate()
 
     def start_idea_generation(self):
@@ -853,6 +939,7 @@ class RapWriter(tk.Tk):
         key = self.api_key
         self._active_job_kind = 'idea'
         self._idea_pending_snapshot = snapshot
+        self._idea_pending_provenance = deepcopy(self._last_ai_idea)
         self._set_busy(True)
         self.status_var.set('Finding a fresh topic, hook, and writing direction…')
 
@@ -881,14 +968,18 @@ class RapWriter(tk.Tk):
         if self.busy or self._idea_undo_snapshot is None:
             return
         self._apply_idea_fields(self._idea_undo_snapshot)
+        self._last_ai_idea = self._idea_undo_provenance
         self._idea_undo_snapshot = None
+        self._idea_undo_provenance = None
         self.undo_idea_btn.configure(state='disabled')
         if self._save_settings():
             self.status_var.set('Previous brief restored. Your lyrics are unchanged.')
 
     def _finish_idea(self, payload):
         snapshot = self._idea_pending_snapshot
+        previous_provenance = self._idea_pending_provenance
         self._idea_pending_snapshot = None
+        self._idea_pending_provenance = None
         self._active_job_kind = None
         self._set_busy(False)
         if self.cancel_event.is_set():
@@ -910,7 +1001,9 @@ class RapWriter(tk.Tk):
             self.status_var.set('The idea could not be applied. Your previous brief and lyrics are still here. Try again.')
             return
         self._idea_undo_snapshot = snapshot
-        self._recent_ideas = (self._recent_ideas + [deepcopy(idea)])[-8:]
+        self._idea_undo_provenance = previous_provenance
+        self._last_ai_idea = deepcopy(idea)
+        self._recent_ideas = (self._recent_ideas + [deepcopy(idea)])[-RECENT_IDEA_LIMIT:]
         self.undo_idea_btn.configure(state='normal')
         self.form_canvas.yview_moveto(0)
         if self._save_settings():
@@ -967,6 +1060,7 @@ class RapWriter(tk.Tk):
         self.load_song_btn.configure(state='disabled' if busy else 'normal')
         self.clear_song_btn.configure(state='disabled' if busy else 'normal')
         self.idea_btn.configure(state='disabled' if busy else 'normal')
+        self.new_brief_btn.configure(state='disabled' if busy else 'normal')
         self.undo_idea_btn.configure(state='normal' if self._idea_undo_snapshot is not None and not busy else 'disabled')
         if busy:
             self._form_states = []
